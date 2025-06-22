@@ -3,6 +3,7 @@
  *  SPDX-License-Identifier: Apache-2.0
  */
 const { v4: uuidv4} = require('uuid');
+const { S3Client, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const utils = require('./lib/utils.js');
 
 exports.handler = async (event,context) => {
@@ -17,7 +18,8 @@ exports.handler = async (event,context) => {
         STACKNAME,
         SNS_TOPIC_ARN
     } = process.env;
-    
+    const s3 = new S3Client();
+
     try {
         /**
          * define inputs/ouputs and a unique string for the mediaconver output path in S3. 
@@ -26,13 +28,23 @@ exports.handler = async (event,context) => {
         const srcVideo = decodeURIComponent(event.Records[0].s3.object.key.replace(/\+/g, " "));
         const srcBucket = decodeURIComponent(event.Records[0].s3.bucket.name);
         const settingsFile = `${srcVideo.split("/")[0]}/${JOB_SETTINGS}`;
+
+        // Fetch S3 object metadata
+        const head = await s3.send(new HeadObjectCommand({ Bucket: srcBucket, Key: srcVideo }));
+        const author = head.Metadata.author || '';
+        const description = head.Metadata.description || '';
+        const shortDescription = head.Metadata.shortdescription || '';
+
         const guid = uuidv4();
         const inputPath = `s3://${srcBucket}/${srcVideo}`;
         const outputPath = `s3://${DESTINATION_BUCKET}/${guid}`;
         const metaData = {
             Guid:guid,
             StackName:STACKNAME,
-            SolutionId:SOLUTION_ID
+            SolutionId:SOLUTION_ID,
+            Author: author,
+            Description: description,
+            ShortDescription: shortDescription
         };
         /**
          * download and validate settings 

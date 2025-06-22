@@ -40,10 +40,23 @@ exports.handler = async (event) => {
                      * get the mediaconvert job details and parse the event outputs
                      */
                     const jobDetails = await utils.processJobDetails(MEDIACONVERT_ENDPOINT,CLOUDFRONT_DOMAIN,event);
+                    
+                    // Extract user metadata from the event if present
+                    const userMetadata = event.detail.userMetadata || {};
+                    const author = userMetadata.Author || '';
+                    const description = userMetadata.Description || '';
+                    const shortDescription = userMetadata.ShortDescription || '';
+                    
                     /**
                      * update the master manifest file in s3
                      */
                     const results = await utils.writeManifest(SOURCE_BUCKET,JOB_MANIFEST,jobDetails);
+                    
+                    // Attach author, description, and shortDescription to results
+                    results.author = author;
+                    results.description = description;
+                    results.shortDescription = shortDescription;
+                    
                     /**
                      * if enabled send annoymous data to the solution builder api, this helps us with future release
                      */
@@ -53,6 +66,8 @@ exports.handler = async (event) => {
                     /**
                      * send a summary of the job to sns
                     */
+                    console.log(`RESULT:: ${JSON.stringify(results, null, 2)}`);
+                    
                     await utils.sendSns(SNS_TOPIC_ARN,STACKNAME,status,results);
                 } catch (err) {
                     throw err;

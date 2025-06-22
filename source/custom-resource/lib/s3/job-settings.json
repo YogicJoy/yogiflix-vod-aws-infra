@@ -568,6 +568,34 @@
               "StreamInfResolution": "INCLUDE"
             }
           }
+        },
+        {
+          "Name": "Thumbnails",
+          "Outputs": [
+            {
+              "ContainerSettings": {
+                "Container": "RAW"
+              },
+              "VideoDescription": {
+                "CodecSettings": {
+                  "Codec": "FRAME_CAPTURE",
+                  "FrameCaptureSettings": {
+                    "FramerateNumerator": 1,
+                    "FramerateDenominator": 10,
+                    "MaxCaptures": 2,
+                    "Quality": 80
+                  }
+                }
+              },
+              "NameModifier": "_thumbnail"
+            }
+          ],
+          "OutputGroupSettings": {
+            "Type": "FILE_GROUP_SETTINGS",
+            "FileGroupSettings": {
+              "Destination": "s3://destinationbucket/guid/thumbnails/"
+            }
+          }
         }
       ],
       "AdAvailOffset": 0,
@@ -593,7 +621,10 @@
           "TimecodeSource": "ZEROBASED",
           "FileInput": "s3://sourcebucket/assets01/test.mp4"
         }
-      ]
+      ],
+      "TimecodeConfig": {
+        "Source": "ZEROBASED"
+      }
     },
     "AccelerationSettings": {
       "Mode": "PREFERRED"

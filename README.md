@@ -127,14 +127,14 @@ in the Region the template is being launched in. Create a bucket in the desired 
 the Region name to the bucket name (for example, `my-bucket-us-east-1`).
 
 ```
-aws s3 mb s3://my-bucket-us-east-1
+aws s3 mb s3://yogiflix-source-us-east-1 --profile gaurang
 ```
 
 ### 3. Create the deployment packages
 Build the distributable:
 ```
 chmod +x ./build-s3-dist.sh
-./build-s3-dist.sh my-bucket video-on-demand-on-aws-foundation v1.2.0
+./build-s3-dist.sh yogiflix-source yogiflix-vod v1.0.2
 ```
 
 > **Note:** The `_build-s3-dist_ script` expects the bucket name as one of its parameters, and this
@@ -143,8 +143,7 @@ chmod +x ./build-s3-dist.sh
 Deploy the distributable to the S3 bucket in your account:
 
 ```
-aws s3 cp ./regional-s3-assets/ s3://my-bucket-us-east-1/video-on-demand-on-aws-foundation/v1.2.0/ \
-    --recursive --acl bucket-owner-full-control
+aws s3 cp ./regional-s3-assets/ s3://yogiflix-source-us-east-1/yogiflix-vod/v1.0.2/ --recursive --acl bucket-owner-full-control --profile gaurang
 ```
 
 ### 4. Launch the CloudFormation template
@@ -152,6 +151,15 @@ aws s3 cp ./regional-s3-assets/ s3://my-bucket-us-east-1/video-on-demand-on-aws-
 Deploy the CloudFormation template from
 `deployment/global-assets/video-on-demand-on-aws-foundation.template` into the same Region as your
 newly created S3 bucket.
+
+### 5. Generate public and private key
+```
+openssl genrsa -out yogicjoy_prt_key.pem 2048
+```
+
+```
+openssl rsa -in yogicjoy_prt_key.pem -pubout -out yogicjoy_pub_key.pem
+```
 
 
 ## Troubleshooting

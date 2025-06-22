@@ -1,56 +1,40 @@
-/**
- * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *  SPDX-License-Identifier: Apache-2.0
- */
-
 import * as cdk from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
 import { HttpMethods } from 'aws-cdk-lib/aws-s3';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as appreg from '@aws-cdk/aws-servicecatalogappregistry-alpha';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import { HttpOrigin, S3Origin } from 'aws-cdk-lib/aws-cloudfront-origins';
+
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-/**
- * AWS Solution Constructs: https://docs.aws.amazon.com/solutions/latest/constructs/
- */
-import { CloudFrontToS3 } from '@aws-solutions-constructs/aws-cloudfront-s3';
 import { EventbridgeToLambda } from '@aws-solutions-constructs/aws-eventbridge-lambda';
 import { LambdaToSns } from '@aws-solutions-constructs/aws-lambda-sns';
-
 
 export class VodFoundation extends cdk.Stack {
     constructor(scope: Construct, id: string, props?: cdk.StackProps) {
         super(scope, id, props);
-        /**
-         * CloudFormation Template Descrption
-         */
-        const solutionId = 'SO0146'
-        const solutionName = 'Video on Demand on AWS Foundation'
+
+        // 1. Parameters & Mappings
+        const solutionId = 'Yogiflix';
+        const solutionName = 'Yogiflix Video on Demand';
         const solutionVersion = scope.node.tryGetContext('solution_version') ?? '%%VERSION%%';
         this.templateOptions.description = `(${solutionId}) ${solutionName} Solution Implementation. Version ${solutionVersion}`;
-        /**
-         * Mapping for sending anonymized metrics to AWS Solution Builders API
-         */
-        const sendMetrics = new cdk.CfnMapping(this, 'Send', {
-            mapping: {
-                AnonymizedUsage: {
-                    Data: 'Yes'
-                }
-            }
-        });
-        /**
-         * Cfn Parameters
-         */
+        
         const adminEmail = new cdk.CfnParameter(this, "emailAddress", {
             type: "String",
             description: "The admin email address to receive SNS notifications for job status.",
             allowedPattern: "^[_A-Za-z0-9-\\+]+(\\.[_A-Za-z0-9-]+)*@[A-Za-z0-9-]+(\\.[A-Za-z0-9]+)*(\\.[A-Za-z]{2,})$"
         });
-        /**
-         * Logs bucket for S3 and CloudFront
-        */
+
+        const sendMetrics = new cdk.CfnMapping(this, 'Send', {
+            mapping: { AnonymizedUsage: { Data: 'Yes' } }
+        });
+
+        // 2. Buckets
         const logsBucket = new s3.Bucket(this, 'Logs', {
             encryption: s3.BucketEncryption.S3_MANAGED,
             publicReadAccess: false,
@@ -59,37 +43,7 @@ export class VodFoundation extends cdk.Stack {
             enforceSSL: true,
             versioned: true
         });
-        /**
-         * Get Cfn Resource for the logs bucket and add CFN_NAG rule
-         */
-        const cfnLogsBucket = logsBucket.node.findChild('Resource') as s3.CfnBucket;
-        cfnLogsBucket.cfnOptions.metadata = {
-            cfn_nag: {
-                rules_to_suppress: [{
-                    id: 'W35',
-                    reason: 'Logs bucket does not require logging configuration'
-                }, {
-                    id: 'W51',
-                    reason: 'Logs bucket is private and does not require a bucket policy'
-                }]
-            }
-        };
-        //cdk_nag
-        NagSuppressions.addResourceSuppressions(
-            logsBucket,
-            [
-                {
-                    id: 'AwsSolutions-S1', //same as cfn_nag rule W35
-                    reason: 'Used to store access logs for other buckets'
-                }, {
-                    id: 'AwsSolutions-S10',
-                    reason: 'Bucket is private and is not using HTTP'
-                }
-            ]
-        );
-        /**
-         * Source S3 bucket to host source videos and jobSettings JSON files
-        */
+
         const source = new s3.Bucket(this, 'Source', {
             serverAccessLogsBucket: logsBucket,
             serverAccessLogsPrefix: 'source-bucket-logs/',
@@ -99,116 +53,263 @@ export class VodFoundation extends cdk.Stack {
             enforceSSL: true,
             versioned: true
         });
-        const cfnSource = source.node.findChild('Resource') as s3.CfnBucket;
-        cfnSource.cfnOptions.metadata = {
-            cfn_nag: {
-                rules_to_suppress: [{
-                    id: 'W51',
-                    reason: 'source bucket is private and does not require a bucket policy'
-                }]
-            }
-        };
-        //cdk_nag
-        NagSuppressions.addResourceSuppressions(
-            source,
-            [
-                {
-                    id: 'AwsSolutions-S10',
-                    reason: 'Bucket is private and is not using HTTP'
-                }
-            ]
-        );
-        /**
-         * Destination S3 bucket to host the mediaconvert outputs
-        */
+
         const destination = new s3.Bucket(this, 'Destination', {
             serverAccessLogsBucket: logsBucket,
             serverAccessLogsPrefix: 'destination-bucket-logs/',
             encryption: s3.BucketEncryption.S3_MANAGED,
             publicReadAccess: false,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-            cors: [
-                {
-                    maxAge: 3000,
-                    allowedOrigins: ['*'],
-                    allowedHeaders: ['*'],
-                    allowedMethods: [HttpMethods.GET]
-                },
-            ],
+            cors: [{
+                maxAge: 3000,
+                allowedOrigins: ['*'],
+                allowedHeaders: ['*'],
+                allowedMethods: [HttpMethods.GET]
+            }],
             enforceSSL: true,
             versioned: true
         });
-        //cdk_nag
-        NagSuppressions.addResourceSuppressions(
-            destination,
-            [
-                {
-                    id: 'AwsSolutions-S10',
-                    reason: 'Bucket is private and is not using HTTP'
-                }
-            ]
-        );
-        /**
-         * Solutions construct to create Cloudfrotnt with an s3 bucket as the origin
-         * https://docs.aws.amazon.com/solutions/latest/constructs/aws-cloudfront-s3.html
-         * insertHttpSecurityHeaders is set to false as this requires the deployment to be in us-east-1
-        */
-        const cloudFront = new CloudFrontToS3(this, 'CloudFront', {
-            existingBucketObj: destination,
-            insertHttpSecurityHeaders: false,
-            cloudFrontDistributionProps: {
-                comment:`${cdk.Aws.STACK_NAME} Video on Demand Foundation`,
-                defaultCacheBehavior: {
-                    allowedMethods: [ 'GET', 'HEAD','OPTIONS' ],
-                    Compress: false,
-                    forwardedValues: {
-                      queryString: false,
-                      headers: [ 'Origin', 'Access-Control-Request-Method','Access-Control-Request-Headers' ],
-                      cookies: { forward: 'none' }
-                    },
-                    viewerProtocolPolicy: 'allow-all'
-                },
-                logBucket: logsBucket,
-                logFilePrefix: 'cloudfront-logs/'
+
+        // 3. CloudFront Public Key & Key Group
+        const publicKey = new cloudfront.PublicKey(this, 'YogicJoyPublicKey', {
+            encodedKey: '-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAg7ZID5WfX2tJI7PNlg7z4Obj/0AIWX/FH4FHhkq2jF2Qq3Kubv4h3Nlg6yMLIGUy0oC+MWYJ6RfeAlcVo4z3YZy1XuEp87cFLSs5gCmvO4lCOgeqIY7dbxH2wBcukBSd1RCGynpRaa2htbU2tUUl1uIs+MLOuk0cgR/XhHPSJ141TuzstW3I1k9ZWSxAZUyOviGaxe+Yo/FLNIQNCo50zrIIEg+NMlGP/pGmhIoboGxyNvIG0sEaJS/hhXwErZl1Xr29NLuwueQHn+kJTw4JDQKMrUsikuYoVQ+hMpX3vkCesig3zq1+Hfbq2kLkK23eY13eB4YlCqVdZQgdzZSv/wIDAQAB\n-----END PUBLIC KEY-----',
+            comment: 'Public key for signed URLs/cookies needed for Yogiflix Video on Demand Foundation',
+            publicKeyName: 'YogicJoyPublicKey'
+        });
+        const keyGroup = new cloudfront.KeyGroup(this, 'YogicJoyKeyGroup', {
+            items: [publicKey],
+            keyGroupName: 'YogicJoyKeyGroup'
+        });
+
+        // 4. Origin Access Control (OAC)
+        const oac = new cloudfront.CfnOriginAccessControl(this, 'YogiflixOAC', {
+            originAccessControlConfig: {
+                name: 'YogiflixOAC',
+                originAccessControlOriginType: 's3',
+                signingBehavior: 'always',
+                signingProtocol: 'sigv4',
+                description: 'OAC for S3 origin'
             }
         });
-        //cdk_nag
+
+        // 5. IAM Roles & Policies (example for getSignedUrlLambda)
+        const getSignedUrlLambdaRole = new iam.Role(this, 'GetSignedUrlLambdaRole', {
+            assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        });
+
+        getSignedUrlLambdaRole.addToPolicy(new iam.PolicyStatement({
+            actions: [
+                'logs:CreateLogGroup',
+                'logs:CreateLogStream',
+                'logs:PutLogEvents',
+                'secretsmanager:GetSecretValue'
+            ],
+            resources: [
+                'arn:aws:secretsmanager:us-east-1:686218048045:secret:YOGIFILX_SECRET_ID-zjQ0pI'
+            ]
+        }));
+
+        getSignedUrlLambdaRole.addManagedPolicy(
+            iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
+        );
+
         NagSuppressions.addResourceSuppressions(
-            destination.policy!,
+            getSignedUrlLambdaRole,
             [
                 {
-                    id: 'AwsSolutions-S10',
-                    reason: 'Bucket is private and is not using HTTP'
+                    id: 'AwsSolutions-IAM5',
+                    reason: 'Lambda needs to access secrets for signing CloudFront URLs. Restrict to specific secret in production.',
+                    appliesTo: ['Resource::*']
+                },
+                {
+                    id: 'AwsSolutions-IAM4',
+                    reason: 'The IAM user, role, or group uses AWS managed policies.'
                 }
             ]
         );
+
+        // 6. Lambda Functions (example for getSignedUrlLambda)
+        
+        const getSignedUrlLambda = new lambda.Function(this, 'GetSignedUrlLambda', {
+            code: lambda.Code.fromAsset('../get-signed-url'),
+            runtime: lambda.Runtime.NODEJS_22_X,
+            handler: 'index.handler',
+            timeout: cdk.Duration.seconds(30),
+            role: getSignedUrlLambdaRole,
+            retryAttempts: 0,
+            environment: {
+                SECRET_ID: 'YOGIFILX_SECRET_ID',
+                RESOURCE_PATTERN: `https://YOUR_CLOUDFRONT_DOMAIN/*`,
+                KEY_PAIR_ID: publicKey.publicKeyId,
+            }
+        });
+
+        const getSignedURLLambdaAccessLogGroup = new logs.LogGroup(this, 'GetSignedUrlLambdaLogGroup', {
+            logGroupName: `/aws/lambda/${getSignedUrlLambda.functionName}`,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+            retention: logs.RetentionDays.ONE_WEEK,
+        });
+
+        // 7. API Gateway
+        const accessLogGroup = new logs.LogGroup(this, 'ApiAccessLogs');
+        const api = new cdk.aws_apigateway.LambdaRestApi(this, 'GetSignedUrlApi', {
+            handler: getSignedUrlLambda,
+            proxy: true,
+            deployOptions: {
+                stageName: 'prod',
+                accessLogDestination: new cdk.aws_apigateway.LogGroupLogDestination(accessLogGroup),
+                accessLogFormat: cdk.aws_apigateway.AccessLogFormat.jsonWithStandardFields()
+            },
+            defaultMethodOptions: {
+                requestValidatorOptions: {
+                    validateRequestBody: true,
+                    validateRequestParameters: true
+                }
+            }
+        });
+
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/GetSignedUrlApi/CloudWatchRole/Resource', [
+            {
+                id: 'AwsSolutions-IAM4',
+                reason: 'API Gateway requires this managed policy for logging.'
+            }
+        ]);
+
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/GetSignedUrlApi/Default/{proxy+}/ANY/Resource', [
+            {
+                id: 'AwsSolutions-APIG4',
+                reason: 'Custom header-based authentication is implemented in Lambda.'
+            },
+            {
+                id: 'AwsSolutions-COG4',
+                reason: 'Cognito is not used; custom authentication is implemented.'
+            }
+        ]);
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/GetSignedUrlApi/Default/ANY/Resource', [
+            {
+                id: 'AwsSolutions-APIG4',
+                reason: 'Custom header-based authentication is implemented in Lambda.'
+            },
+            {
+                id: 'AwsSolutions-COG4',
+                reason: 'Cognito is not used; custom authentication is implemented.'
+            }
+        ]);
+
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/GetSignedUrlApi/DeploymentStage.prod/Resource', [
+            {
+                id: 'AwsSolutions-APIG6',
+                reason: 'Access logging is enabled at the stage level.'
+            },
+            {
+                id: 'AwsSolutions-APIG3',
+                reason: 'WAF is not required for this API in this solution.'
+            }
+        ]);
+
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/GetSignedUrlApi/Resource', [
+            {
+                id: 'AwsSolutions-APIG2',
+                reason: 'Request validation is enabled via defaultMethodOptions.'
+            }
+        ]);
+
+        // 8. CloudFront Distribution (with OAC)
+        const apiOrigin = new HttpOrigin(
+            cdk.Fn.select(2, cdk.Fn.split('/', api.url)), { originPath: '/prod' }
+        );
+        const s3Origin = new S3Origin(destination);
+
+        const distribution = new cloudfront.Distribution(this, 'YogiflixDistribution', {
+            defaultBehavior: {
+                origin: apiOrigin,
+                allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+                viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+                originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+            },
+            additionalBehaviors: {
+                '*.m3u8': {
+                    origin: s3Origin,
+                    allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+                    viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+                    originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_S3_ORIGIN,
+                    trustedKeyGroups: [keyGroup],
+                },
+                '*.ts': {
+                    origin: s3Origin,
+                    allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+                    viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+                    originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_S3_ORIGIN,
+                    trustedKeyGroups: [keyGroup],
+                },
+                '*.jpg': {
+                    origin: s3Origin,
+                    allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+                    viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+                    originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_S3_ORIGIN,
+                    trustedKeyGroups: [keyGroup],
+                }
+            },
+            minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+            enableLogging: true,
+            logBucket: logsBucket,
+            logFilePrefix: 'cloudfront-logs/',
+            comment: `${cdk.Aws.STACK_NAME} Video on Demand Foundation`
+        });
+
+        // Attach OAC to the S3 origin in the distribution
+        const cfnDistribution = distribution.node.defaultChild as cloudfront.CfnDistribution;
+        // Patch the S3 origin with OAC by overriding the CloudFormation property
+        const origins = (cfnDistribution as any).origins ?? (cfnDistribution as any)._origins;
+        if (origins) {
+            const s3OriginIndex = origins.findIndex((origin: any) =>
+                origin.domainName === destination.bucketRegionalDomainName
+            );
+            if (s3OriginIndex !== -1) {
+                // Add the originAccessControlId property using addOverride
+                cfnDistribution.addOverride(`Properties.Origins.${s3OriginIndex}.OriginAccessControlId`, oac.attrId);
+            }
+        }
+
+        // 9. S3 Bucket Policy for OAC
+        destination.addToResourcePolicy(new iam.PolicyStatement({
+            actions: ['s3:GetObject'],
+            resources: [destination.arnForObjects('*')],
+            principals: [new iam.ServicePrincipal('cloudfront.amazonaws.com')],
+            conditions: {
+                StringEquals: {
+                    'AWS:SourceArn': `arn:aws:cloudfront::${cdk.Aws.ACCOUNT_ID}:distribution/${distribution.distributionId}`
+                }
+            }
+        }));
+
+        // 10. Nag Suppressions (add as needed)
         NagSuppressions.addResourceSuppressions(
-            cloudFront.cloudFrontWebDistribution,
+            distribution,
             [
                 {
                     id: 'AwsSolutions-CFR1',
-                    reason: 'Use case does not warrant CloudFront Geo restriction'
-                }, {
-                    id: 'AwsSolutions-CFR2',
-                    reason: 'Use case does not warrant CloudFront integration with AWS WAF'
-                }, {
-                    id: 'AwsSolutions-CFR4', //same as cfn_nag rule W70
-                    reason: 'CloudFront automatically sets the security policy to TLSv1 when the distribution uses the CloudFront domain name'
-                }, {
-                    "id": "AwsSolutions-CFR7",
-                    "reason": "False alarm. The AWS-cloudfront-s3 solutions construct provides Origin-Access-Control by default.",
+                    reason: 'Geo restriction is not required for this solution.'
                 },
-            ]
-        );
-        NagSuppressions.addResourceSuppressions(
-            cloudFront.cloudFrontLoggingBucket!,
-            [
                 {
-                    id: 'AwsSolutions-S1',
-                    reason: 'Used to store access logs for other buckets'
+                    id: 'AwsSolutions-CFR2',
+                    reason: 'WAF is not required for this solution.'
+                },
+                {
+                    id: 'AwsSolutions-CFR4',
+                    reason: 'CloudFront default certificate does not support enforcing TLSv1.2. Custom ACM certificate required for compliance.'
+                },
+                {
+                    id: 'AwsSolutions-CFR7',
+                    reason: 'The CloudFront distribution does not use an origin access control with an S3 origin. Origin access controls help with security by restricting any direct access to objects through S3 URLs'
                 }
             ]
         );
+
         /**
          * MediaConvert Service Role to grant Mediaconvert Access to the source and Destination Bucket,
          * API invoke * is also required for the services.
@@ -456,7 +557,7 @@ export class VodFoundation extends cdk.Stack {
             description: 'Triggered by EventBridge,processes completed MediaConvert jobs.',
             environment: {
                 MEDIACONVERT_ENDPOINT: customResourceEndpoint.getAttString('Endpoint'),
-                CLOUDFRONT_DOMAIN: cloudFront.cloudFrontWebDistribution.distributionDomainName,
+                CLOUDFRONT_DOMAIN: distribution.distributionDomainName,
                 /** SNS_TOPIC_ARN: added by the solution construct below */
                 SOURCE_BUCKET: source.bucketName,
                 JOB_MANIFEST: 'jobs-manifest.json',
@@ -583,7 +684,7 @@ export class VodFoundation extends cdk.Stack {
             exportName: `${ cdk.Aws.STACK_NAME}-DestinationBucket`
         });
         new cdk.CfnOutput(this, 'CloudFrontDomain', { // NOSONAR
-            value: cloudFront.cloudFrontWebDistribution.distributionDomainName,
+            value: distribution.distributionDomainName,
             description: 'CloudFront Domain Name',
             exportName: `${ cdk.Aws.STACK_NAME}-CloudFrontDomain`
         });
