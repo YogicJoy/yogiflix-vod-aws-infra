@@ -3,18 +3,18 @@ const crypto = require('crypto');
 function getSignedUrl(url, privateKey, expiresInSeconds, resourcePattern, keyPairId) {
     const expires = Math.floor(Date.now() / 1000) + expiresInSeconds;
 
-    // Custom policy allows wildcards in resource if needed
-    const resource = resourcePattern || url;
     const policy = {
         Statement: [
             {
-                Resource: resource,
+                Resource: resourcePattern,
                 Condition: {
                     DateLessThan: { 'AWS:EpochTime': expires }
                 }
             }
         ]
     };
+
+    console.log(`POLICY:: ${JSON.stringify(policy, null, 2)}`);
 
     const policyStr = JSON.stringify(policy);
     const policyBase64 = Buffer.from(policyStr).toString('base64').replace(/\+/g, '-').replace(/=/g, '_').replace(/\//g, '~');
@@ -31,7 +31,10 @@ function getSignedUrl(url, privateKey, expiresInSeconds, resourcePattern, keyPai
         separator +
         'Policy=' + policyBase64 +
         '&Signature=' + signature +
-        '&Key-Pair-Id=' + keyPairId
+        '&Key-Pair-Id=' + keyPairId +
+        '&Policy-PREFIX=' + policyBase64 +
+        '&Signature-PREFIX=' + signature +
+        '&Key-Pair-Id-PREFIX=' + keyPairId
     );
 }
 module.exports = { getSignedUrl };

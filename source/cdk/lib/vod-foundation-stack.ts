@@ -14,6 +14,9 @@ import { Construct } from 'constructs';
 import { EventbridgeToLambda } from '@aws-solutions-constructs/aws-eventbridge-lambda';
 import { LambdaToSns } from '@aws-solutions-constructs/aws-lambda-sns';
 
+import * as fs from 'fs';
+import * as path from 'path';
+
 export class VodFoundation extends cdk.Stack {
     constructor(scope: Construct, id: string, props?: cdk.StackProps) {
         super(scope, id, props);
@@ -92,7 +95,7 @@ export class VodFoundation extends cdk.Stack {
             }
         });
 
-        // 5. IAM Roles & Policies (example for getSignedUrlLambda)
+        // IAM Roles & Policies (example for getSignedUrlLambda)
         const getSignedUrlLambdaRole = new iam.Role(this, 'GetSignedUrlLambdaRole', {
             assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
         });
@@ -128,8 +131,54 @@ export class VodFoundation extends cdk.Stack {
             ]
         );
 
-        // 6. Lambda Functions (example for getSignedUrlLambda)
-        
+        const playlistProxyLambdaRole = new iam.Role(this, 'PlaylistProxyLambdaRole', {
+            assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+            description: 'IAM role for playlist-proxy Lambda to read S3 and write logs',
+        });
+
+        const playlistProxyLambdaPolicy = new iam.Policy(this, 'PlaylistProxyLambdaPolicy', {
+            statements: [
+                new iam.PolicyStatement({
+                    actions: ["s3:GetObject"],
+                    resources: [destination.bucketArn, `${destination.bucketArn}/*`]
+                }),
+                new iam.PolicyStatement({
+                    actions: [
+                        "logs:CreateLogGroup",
+                        "logs:CreateLogStream",
+                        "logs:PutLogEvents"
+                    ],
+                    resources: ['*'],
+                }),
+                new iam.PolicyStatement({
+                    actions: ['secretsmanager:GetSecretValue'],
+                    resources: [
+                        'arn:aws:secretsmanager:us-east-1:686218048045:secret:YOGIFILX_SECRET_ID-zjQ0pI'
+                    ]
+                })
+            ]
+        });
+        playlistProxyLambdaPolicy.attachToRole(playlistProxyLambdaRole);
+
+        NagSuppressions.addResourceSuppressions(
+            playlistProxyLambdaPolicy,
+            [
+                {
+                    id: 'AwsSolutions-IAM5',
+                    reason: 'Lambda needs to read all objects in the destination bucket and write logs. Restrict to specific bucket/log group in production.',
+                    appliesTo: [
+                        'Resource::<Destination920A3C57.Arn>/*',
+                        'Resource::*'
+                    ]
+                },
+                {
+                    id: 'AwsSolutions-IAM4',
+                    reason: 'The IAM user, role, or group uses AWS managed policies.'
+                }
+            ]
+        );
+
+        // 6. Lambda Functions
         const getSignedUrlLambda = new lambda.Function(this, 'GetSignedUrlLambda', {
             code: lambda.Code.fromAsset('../get-signed-url'),
             runtime: lambda.Runtime.NODEJS_22_X,
@@ -144,15 +193,36 @@ export class VodFoundation extends cdk.Stack {
             }
         });
 
+        const playlistProxyLambda = new lambda.Function(this, 'PlaylistProxyLambda', {
+            code: lambda.Code.fromAsset('../playlist-proxy'),
+            runtime: lambda.Runtime.NODEJS_22_X,
+            handler: 'index.handler',
+            timeout: cdk.Duration.seconds(30),
+            role: playlistProxyLambdaRole,
+            environment: {
+                S3_BUCKET: destination.bucketName,
+                CLOUDFRONT_DOMAIN: 'YOUR_CLOUDFRONT_DOMAIN',
+                SECRET_ID: 'YOGIFILX_SECRET_ID',
+                KEY_PAIR_ID: publicKey.publicKeyId
+            }
+        });
+
         const getSignedURLLambdaAccessLogGroup = new logs.LogGroup(this, 'GetSignedUrlLambdaLogGroup', {
             logGroupName: `/aws/lambda/${getSignedUrlLambda.functionName}`,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
             retention: logs.RetentionDays.ONE_WEEK,
         });
 
+        const playlistPorxyLambdaAccessLogGroup = new logs.LogGroup(this, 'PlaylistProxyLambdaLogGroup', {
+            logGroupName: `/aws/lambda/${playlistProxyLambda.functionName}`,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+            retention: logs.RetentionDays.ONE_WEEK,
+        });
+
         // 7. API Gateway
         const accessLogGroup = new logs.LogGroup(this, 'ApiAccessLogs');
-        const api = new cdk.aws_apigateway.LambdaRestApi(this, 'GetSignedUrlApi', {
+
+        const getSignedURLAPI = new cdk.aws_apigateway.LambdaRestApi(this, 'GetSignedUrlApi', {
             handler: getSignedUrlLambda,
             proxy: true,
             deployOptions: {
@@ -214,22 +284,102 @@ export class VodFoundation extends cdk.Stack {
             }
         ]);
 
+        // Playlist Proxy API
+        const playlistProxyApiAccessLogGroup = new logs.LogGroup(this, 'PlaylistProxyApiAccessLogs');
+        const playlistProxyApi = new cdk.aws_apigateway.LambdaRestApi(this, 'PlaylistProxyApi', {
+            handler: playlistProxyLambda,
+            proxy: false,
+            deployOptions: {
+                stageName: 'prod',
+                accessLogDestination: new cdk.aws_apigateway.LogGroupLogDestination(playlistProxyApiAccessLogGroup),
+                accessLogFormat: cdk.aws_apigateway.AccessLogFormat.jsonWithStandardFields()
+            },
+            defaultMethodOptions: {
+                requestValidatorOptions: {
+                    validateRequestBody: true,
+                    validateRequestParameters: true
+                }
+            }
+        });
+
+        // Add a resource and method for proxying playlist requests
+        const playlistResource = playlistProxyApi.root.addResource('{proxy+}');
+        playlistResource.addMethod('GET'); // GET /{proxy+}
+
+        // NagSuppressions for API Gateway
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/PlaylistProxyApi/CloudWatchRole/Resource', [
+            {
+                id: 'AwsSolutions-IAM4',
+                reason: 'API Gateway requires this managed policy for logging.'
+            }
+        ]);
+
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/PlaylistProxyApi/Default/{proxy+}/GET/Resource', [
+            {
+                id: 'AwsSolutions-APIG4',
+                reason: 'Custom header-based authentication is implemented in Lambda.'
+            },
+            {
+                id: 'AwsSolutions-COG4',
+                reason: 'Cognito is not used; custom authentication is implemented.'
+            }
+        ]);
+
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/PlaylistProxyApi/DeploymentStage.prod/Resource', [
+            {
+                id: 'AwsSolutions-APIG6',
+                reason: 'Access logging is enabled at the stage level.'
+            },
+            {
+                id: 'AwsSolutions-APIG3',
+                reason: 'WAF is not required for this API in this solution.'
+            }
+        ]);
+
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/PlaylistProxyApi/Resource', [
+            {
+                id: 'AwsSolutions-APIG2',
+                reason: 'Request validation is enabled via defaultMethodOptions.'
+            }
+        ]);
+
         // 8. CloudFront Distribution (with OAC)
-        const apiOrigin = new HttpOrigin(
-            cdk.Fn.select(2, cdk.Fn.split('/', api.url)), { originPath: '/prod' }
+        const getSignedURLAPIOrigin = new HttpOrigin(
+            cdk.Fn.select(2, cdk.Fn.split('/', getSignedURLAPI.url)), { originPath: '/prod' }
         );
+
+        const playlistProxyOrigin = new HttpOrigin(
+            cdk.Fn.select(2, cdk.Fn.split('/', playlistProxyApi.url)), { originPath: '/prod' }
+        );
+
         const s3Origin = new S3Origin(destination);
 
         const distribution = new cloudfront.Distribution(this, 'YogiflixDistribution', {
             defaultBehavior: {
-                origin: apiOrigin,
+                origin: getSignedURLAPIOrigin,
                 allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
                 viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-                originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER
             },
             additionalBehaviors: {
-                '*.m3u8': {
+                '*Ott_Hls_Ts_Avc_Aac*.m3u8': {
+                    origin: playlistProxyOrigin,
+                    allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+                    viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+                    originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                    trustedKeyGroups: [keyGroup]
+                },
+                '*m3u8': {
+                    origin: playlistProxyOrigin,
+                    allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+                    viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+                    originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                    trustedKeyGroups: [keyGroup]
+                },
+                '*ts': {
                     origin: s3Origin,
                     allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
                     viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -237,15 +387,7 @@ export class VodFoundation extends cdk.Stack {
                     originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_S3_ORIGIN,
                     trustedKeyGroups: [keyGroup],
                 },
-                '*.ts': {
-                    origin: s3Origin,
-                    allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
-                    viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                    cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-                    originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_S3_ORIGIN,
-                    trustedKeyGroups: [keyGroup],
-                },
-                '*.jpg': {
+                '*jpg': {
                     origin: s3Origin,
                     allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
                     viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -259,6 +401,14 @@ export class VodFoundation extends cdk.Stack {
             logBucket: logsBucket,
             logFilePrefix: 'cloudfront-logs/',
             comment: `${cdk.Aws.STACK_NAME} Video on Demand Foundation`
+        });
+
+        destination.addCorsRule({
+            allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.HEAD],
+            allowedOrigins: ['*'],
+            allowedHeaders: ['*'],
+            exposedHeaders: ['ETag'],
+            maxAge: 3000,
         });
 
         // Attach OAC to the S3 origin in the distribution
