@@ -34,6 +34,7 @@ exports.handler = async (event,context) => {
         const author = head.Metadata.author || '';
         const description = head.Metadata.description || '';
         const shortDescription = head.Metadata.shortdescription || '';
+        const title = head.Metadata.title || '';
 
         const guid = uuidv4();
         const inputPath = `s3://${srcBucket}/${srcVideo}`;
@@ -44,8 +45,10 @@ exports.handler = async (event,context) => {
             SolutionId:SOLUTION_ID,
             Author: author,
             Description: description,
-            ShortDescription: shortDescription
+            ShortDescription: shortDescription,
+            Title: title
         };
+        
         /**
          * download and validate settings 
          */

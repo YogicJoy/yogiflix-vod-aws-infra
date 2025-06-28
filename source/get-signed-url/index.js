@@ -4,13 +4,13 @@ const { getSignedUrl } = require('./lib/signer');
 const secretsClient = new SecretsManagerClient();
 
 exports.handler = async (event) => {
-    console.log(`REQUEST:: ${JSON.stringify(event, null, 2)}`);
+    //console.log(`REQUEST:: ${JSON.stringify(event, null, 2)}`);
     // Parse request body
     let body;
 
     try {
         body = JSON.parse(event.body || '{}');
-        console.log(`Parsed body: ${JSON.stringify(body)}`);
+        //console.log(`Parsed body: ${JSON.stringify(body)}`);
     } catch {
         return { statusCode: 400, body: 'Invalid JSON' };
     }
@@ -38,15 +38,17 @@ exports.handler = async (event) => {
         return { statusCode: 400, body: 'Missing url parameter' };
     }
 
+    const TEN_YEARS_IN_SECONDS = 10 * 365 * 24 * 60 * 60; // 315360000
+
     // Sign the URL
     const signedUrl = getSignedUrl(
         url,
         privateKey,
-        3600, // Default to 1 hour
+        TEN_YEARS_IN_SECONDS,
         process.env.RESOURCE_PATTERN,
         process.env.KEY_PAIR_ID
     );
-    console.log(`Generated signed URL: ${signedUrl}`);
+    //console.log(`Generated signed URL: ${signedUrl}`);
     return {
         statusCode: 200,
         body: JSON.stringify({ signedUrl }),

@@ -13,9 +13,8 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { EventbridgeToLambda } from '@aws-solutions-constructs/aws-eventbridge-lambda';
 import { LambdaToSns } from '@aws-solutions-constructs/aws-lambda-sns';
-
-import * as fs from 'fs';
-import * as path from 'path';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 
 export class VodFoundation extends cdk.Stack {
     constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -95,6 +94,28 @@ export class VodFoundation extends cdk.Stack {
             }
         });
 
+        // DynamoDB Table for YogiflixMedia
+        const yogiflixMediaTable = new dynamodb.Table(this, 'YogiflixMedia', {
+            tableName: 'YogiflixMedia',
+            partitionKey: { name: 'guid', type: dynamodb.AttributeType.STRING },
+            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+            removalPolicy: cdk.RemovalPolicy.DESTROY, // TODO: Change to RETAIN for PROD
+            pointInTimeRecovery: true,
+            encryption: dynamodb.TableEncryption.AWS_MANAGED,
+            stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES
+        });
+
+        // Add a global secondary index for YogiflixMedia table
+        yogiflixMediaTable.addGlobalSecondaryIndex({
+            indexName: 'TitleIndex',
+            partitionKey: { name: 'title', type: dynamodb.AttributeType.STRING }
+        });
+
+        yogiflixMediaTable.addGlobalSecondaryIndex({
+            indexName: 'AuthorIndex',
+            partitionKey: { name: 'author', type: dynamodb.AttributeType.STRING }
+        });
+
         // IAM Roles & Policies (example for getSignedUrlLambda)
         const getSignedUrlLambdaRole = new iam.Role(this, 'GetSignedUrlLambdaRole', {
             assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
@@ -108,7 +129,7 @@ export class VodFoundation extends cdk.Stack {
                 'secretsmanager:GetSecretValue'
             ],
             resources: [
-                'arn:aws:secretsmanager:us-east-1:686218048045:secret:YOGIFILX_SECRET_ID-zjQ0pI'
+                `arn:aws:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:YOGIFILX_SECRET_ID-zjQ0pI`
             ]
         }));
 
@@ -153,7 +174,7 @@ export class VodFoundation extends cdk.Stack {
                 new iam.PolicyStatement({
                     actions: ['secretsmanager:GetSecretValue'],
                     resources: [
-                        'arn:aws:secretsmanager:us-east-1:686218048045:secret:YOGIFILX_SECRET_ID-zjQ0pI'
+                        `arn:aws:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:YOGIFILX_SECRET_ID-zjQ0pI`
                     ]
                 })
             ]
@@ -460,6 +481,106 @@ export class VodFoundation extends cdk.Stack {
             ]
         );
 
+        const syncMediaLambdaRole = new iam.Role(this, 'SyncMediaLambdaRole', {
+            assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+            description: 'Role for sync-media Lambda to delete DynamoDB items when folders are deleted from destination bucket',
+        });
+
+        syncMediaLambdaRole.addManagedPolicy(
+            iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
+        );
+
+        syncMediaLambdaRole.addToPolicy(new iam.PolicyStatement({
+            actions: [
+                's3:ListBucket',
+                's3:DeleteObject'
+            ],
+            resources: [
+                destination.bucketArn,
+                `${destination.bucketArn}/*`
+            ]
+        }));
+
+        // Add log permissions for sync-media Lambda
+        syncMediaLambdaRole.addToPolicy(new iam.PolicyStatement({
+            actions: [
+                'logs:CreateLogGroup',
+                'logs:CreateLogStream',
+                'logs:PutLogEvents'
+            ],
+            resources: ['*']
+        }));
+
+        const syncMediaLambda = new lambda.Function(this, 'SyncMediaLambda', {
+            code: lambda.Code.fromAsset('../sync-media'),
+            runtime: lambda.Runtime.NODEJS_22_X,
+            handler: 'index.handler',
+            timeout: cdk.Duration.seconds(30),
+            memorySize: 256,
+            role: syncMediaLambdaRole,
+            retryAttempts: 0,
+            environment: {
+                MEDIA_TABLE: yogiflixMediaTable.tableName,
+                DESTINATION_BUCKET: destination.bucketName
+            }
+        });
+
+        syncMediaLambda.addEventSource(new lambdaEventSources.DynamoEventSource(yogiflixMediaTable, {
+            startingPosition: lambda.StartingPosition.LATEST,
+            batchSize: 5,
+            retryAttempts: 2,
+            filters: [
+                lambda.FilterCriteria.filter({
+                    eventName: lambda.FilterRule.isEqual('REMOVE')
+                })
+            ]
+        }));
+
+        const syncMediaLambdaLogGroup = new logs.LogGroup(this, 'SyncMediaLambdaLogGroup', {
+            logGroupName: `/aws/lambda/${syncMediaLambda.functionName}`,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+            retention: logs.RetentionDays.ONE_WEEK,
+        });
+
+        // Grant permission for S3 to invoke the Lambda
+        syncMediaLambda.addPermission('AllowS3Invoke', {
+            principal: new iam.ServicePrincipal('s3.amazonaws.com'),
+            action: 'lambda:InvokeFunction',
+            sourceAccount: cdk.Aws.ACCOUNT_ID,
+            sourceArn: destination.bucketArn
+        });
+
+        NagSuppressions.addResourceSuppressions(
+            syncMediaLambdaRole,
+            [
+                {
+                    id: 'AwsSolutions-IAM4',
+                    reason: 'The role uses AWS managed policy AWSLambdaBasicExecutionRole for basic Lambda execution. This is standard for Lambda logging.',
+                    appliesTo: [
+                        'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+                    ]
+                }
+            ]
+        );
+
+        // Find the DefaultPolicy created by CDK on the role
+        const syncMediaLambdaRoleDefaultPolicy = syncMediaLambdaRole.node.tryFindChild('DefaultPolicy') as iam.Policy;
+
+        // Suppress the GSI wildcard finding on the DefaultPolicy
+        NagSuppressions.addResourceSuppressions(
+            syncMediaLambdaRoleDefaultPolicy,
+            [
+                {
+                    id: 'AwsSolutions-IAM5',
+                    reason: 'Lambda needs to write logs to any log group/stream.',
+                    appliesTo: [
+                        'Resource::<Destination920A3C57.Arn>/*',
+                        'Resource::*'
+                    ]
+                }
+            ]
+        );
+
         /**
          * MediaConvert Service Role to grant Mediaconvert Access to the source and Destination Bucket,
          * API invoke * is also required for the services.
@@ -683,17 +804,66 @@ export class VodFoundation extends cdk.Stack {
                         "logs:PutLogEvents"
                     ],
                     resources: ['*'],
+                }),
+                new iam.PolicyStatement({
+                    actions: [
+                        "secretsmanager:GetSecretValue",
+                        "dynamodb:PutItem",
+                        "dynamodb:UpdateItem",
+                        "dynamodb:GetItem"
+                    ],
+                    resources: [
+                        `arn:aws:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:YOGIFILX_SECRET_ID-zjQ0pI`,
+                        `arn:${cdk.Aws.PARTITION}:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/YogiflixMedia`
+                    ]
                 })
             ]
         });
         jobCompletePolicy.attachToRole(jobCompleteRole);
         //cdk_nag
-        addResourceSuppressions(
+        NagSuppressions.addResourceSuppressions(
             jobCompletePolicy,
             [
                 {
-                    id: [ 'AwsSolutions-IAM5', 'W12' ],
-                    reason: 'Resource ARNs are not generated at the time of policy creation'
+                    id: 'AwsSolutions-IAM5',
+                    reason: 'Lambda needs to access all objects in the source bucket for MediaConvert job processing.',
+                    appliesTo: [
+                        'Resource::<Source71E471F1.Arn>/*'
+                    ]
+                },
+                {
+                    id: 'AwsSolutions-IAM5',
+                    reason: 'Lambda needs to access all MediaConvert jobs in the account.',
+                    appliesTo: [
+                        'Resource::arn:<AWS::Partition>:mediaconvert:<AWS::Region>:<AWS::AccountId>:*'
+                    ]
+                },
+                {
+                    id: 'AwsSolutions-IAM5',
+                    reason: 'Lambda needs to write logs to any log group/stream.',
+                    appliesTo: [
+                        'Resource::*'
+                    ]
+                },
+            ],
+            true  // Apply to all resources in the policy
+        );
+
+        yogiflixMediaTable.grantReadWriteData(jobCompleteRole);
+
+        // Find the DefaultPolicy created by CDK on the role
+        const yogiflixMediaTableDefaultPolicy = jobCompleteRole.node.tryFindChild('DefaultPolicy') as iam.Policy;
+
+        // Suppress the GSI wildcard finding on the DefaultPolicy
+        NagSuppressions.addResourceSuppressions(
+            yogiflixMediaTableDefaultPolicy,
+            [
+                {
+                    id: 'AwsSolutions-IAM5',
+                    reason: 'CDK grantReadWriteData automatically adds GSI wildcard permissions for DynamoDB table access. This is required for Lambda to access GSIs. See: https://github.com/aws/aws-cdk/issues/20442',
+                    appliesTo: [
+                        'Resource::<YogiflixMediaAF9455D5.Arn>/index/*'
+                    ]
                 }
             ]
         );
@@ -702,8 +872,9 @@ export class VodFoundation extends cdk.Stack {
             code: lambda.Code.fromAsset(`../job-complete`),
             runtime: lambda.Runtime.NODEJS_22_X,
             handler: 'index.handler',
-            timeout: cdk.Duration.seconds(30),
+            timeout: cdk.Duration.seconds(60),
             retryAttempts:0,
+            memorySize: 512,
             description: 'Triggered by EventBridge,processes completed MediaConvert jobs.',
             environment: {
                 MEDIACONVERT_ENDPOINT: customResourceEndpoint.getAttString('Endpoint'),
@@ -716,7 +887,9 @@ export class VodFoundation extends cdk.Stack {
                 SOLUTION_ID: solutionId,
                 VERSION:solutionVersion,
                 UUID:customResourceEndpoint.getAttString('UUID'),
-                SOLUTION_IDENTIFIER: `AwsSolution/${solutionId}/${solutionVersion}`
+                SOLUTION_IDENTIFIER: `AwsSolution/${solutionId}/${solutionVersion}`,
+                GET_SIGNED_URL_API: getSignedURLAPI.url,
+                SECRET_ID: 'YOGIFILX_SECRET_ID',
             },
             role: jobCompleteRole
         });
