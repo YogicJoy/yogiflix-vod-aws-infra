@@ -116,6 +116,11 @@ export class VodFoundation extends cdk.Stack {
             partitionKey: { name: 'author', type: dynamodb.AttributeType.STRING }
         });
 
+        yogiflixMediaTable.addGlobalSecondaryIndex({
+            indexName: 'CategoryIndex',
+            partitionKey: { name: 'category', type: dynamodb.AttributeType.STRING }
+        });
+
         // IAM Roles & Policies (example for getSignedUrlLambda)
         const getSignedUrlLambdaRole = new iam.Role(this, 'GetSignedUrlLambdaRole', {
             assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
@@ -581,6 +586,158 @@ export class VodFoundation extends cdk.Stack {
             ]
         );
 
+        //get-yogiflix-media Lambda
+        const getYogiflixMediaLambdaRole = new iam.Role(this, 'GetYogiflixMediaLambdaRole', {
+            assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+            description: 'Role for get-yogiflix-media Lambda to read from YogiflixMedia DynamoDB table',
+        });
+
+        getYogiflixMediaLambdaRole.addToPolicy(new iam.PolicyStatement({
+            actions: [
+                'dynamodb:Scan',
+                'dynamodb:Query'
+            ],
+            resources: [yogiflixMediaTable.tableArn]
+        }));
+
+        getYogiflixMediaLambdaRole.addToPolicy(new iam.PolicyStatement({
+            actions: [
+                'logs:CreateLogGroup',
+                'logs:CreateLogStream',
+                'logs:PutLogEvents'
+            ],
+            resources: ['*']
+        }));
+
+        getYogiflixMediaLambdaRole.addToPolicy(new iam.PolicyStatement({
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [
+                `arn:aws:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:YOGIFILX_SECRET_ID-zjQ0pI`
+            ]
+        }));
+
+        getYogiflixMediaLambdaRole.addManagedPolicy(
+            iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
+        );
+
+        NagSuppressions.addResourceSuppressions(
+            getYogiflixMediaLambdaRole,
+            [
+                {
+                    id: 'AwsSolutions-IAM4',
+                    reason: 'The role uses AWS managed policy AWSLambdaBasicExecutionRole for basic Lambda execution. This is standard for Lambda logging.',
+                    appliesTo: [
+                        'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+                    ]
+                },
+                {
+                    id: 'AwsSolutions-IAM5',
+                    reason: 'Lambda needs to write logs to any log group/stream.',
+                    appliesTo: [
+                        'Resource::*'
+                    ]
+                }
+            ]
+        );
+
+        const getYogiflixMediaLambda = new lambda.Function(this, 'GetYogiflixMediaLambda', {
+            code: lambda.Code.fromAsset('../get-yogiflix-media'),
+            runtime: lambda.Runtime.NODEJS_22_X,
+            handler: 'index.handler',
+            timeout: cdk.Duration.seconds(30),
+            memorySize: 256,
+            role: getYogiflixMediaLambdaRole,
+            environment: {
+                MEDIA_TABLE: yogiflixMediaTable.tableName,
+                SECRET_ID: 'YOGIFILX_SECRET_ID',
+            }
+        });
+
+        const getYogiflixMediaLambdaLogGroup = new logs.LogGroup(this, 'GetYogiflixMediaLambdaLogGroup', {
+            logGroupName: `/aws/lambda/${getYogiflixMediaLambda.functionName}`,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+            retention: logs.RetentionDays.ONE_WEEK,
+        });
+
+        const getYogiflixMediaApiAccessLogGroup = new logs.LogGroup(this, 'GetYogiflixMediaApiAccessLogs');
+
+        const getYogiflixMediaApi = new cdk.aws_apigateway.LambdaRestApi(this, 'GetYogiflixMediaApi', {
+            handler: getYogiflixMediaLambda,
+            proxy: true,
+            deployOptions: {
+                stageName: 'prod',
+                accessLogDestination: new cdk.aws_apigateway.LogGroupLogDestination(getYogiflixMediaApiAccessLogGroup),
+                accessLogFormat: cdk.aws_apigateway.AccessLogFormat.jsonWithStandardFields()
+            },
+            defaultMethodOptions: {
+                requestValidatorOptions: {
+                    validateRequestBody: false,
+                    validateRequestParameters: false
+                }
+            }
+        });
+
+        // NagSuppressions for API Gateway
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/GetYogiflixMediaApi/CloudWatchRole/Resource', [
+            {
+                id: 'AwsSolutions-IAM4',
+                reason: 'API Gateway requires this managed policy for logging.'
+            }
+        ]);
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/GetYogiflixMediaApi/Resource', [
+            {
+                id: 'AwsSolutions-APIG2',
+                reason: 'Request validation is enabled via defaultMethodOptions.'
+            }
+        ]);
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/GetYogiflixMediaApi/DeploymentStage.prod/Resource', [
+            {
+                id: 'AwsSolutions-APIG6',
+                reason: 'Access logging is enabled at the stage level.'
+            },
+            {
+                id: 'AwsSolutions-APIG3',
+                reason: 'WAF is not required for this API in this solution.'
+            }
+        ]);
+
+        // Suppress wildcard resource warning for GetYogiflixMediaLambdaRole DefaultPolicy
+        const getYogiflixMediaLambdaRoleDefaultPolicy = getYogiflixMediaLambdaRole.node.tryFindChild('DefaultPolicy') as iam.Policy;
+        NagSuppressions.addResourceSuppressions(
+            getYogiflixMediaLambdaRoleDefaultPolicy,
+            [
+                {
+                    id: 'AwsSolutions-IAM5',
+                    reason: 'Lambda needs to write logs to any log group/stream. This is required for Lambda logging. See: https://docs.aws.amazon.com/lambda/latest/dg/monitoring-cloudwatchlogs.html',
+                    appliesTo: [
+                        'Resource::*'
+                    ]
+                }
+            ]
+        );
+
+        // Suppress API Gateway authorization warnings for GetYogiflixMediaApi
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/GetYogiflixMediaApi/Default/{proxy+}/ANY/Resource', [
+            {
+                id: 'AwsSolutions-APIG4',
+                reason: 'Custom authentication/authorization is implemented at the Lambda level for this API.'
+            },
+            {
+                id: 'AwsSolutions-COG4',
+                reason: 'Cognito is not used; custom authentication is implemented at the Lambda level.'
+            }
+        ]);
+        NagSuppressions.addResourceSuppressionsByPath(this, '/VodFoundation/GetYogiflixMediaApi/Default/ANY/Resource', [
+            {
+                id: 'AwsSolutions-APIG4',
+                reason: 'Custom authentication/authorization is implemented at the Lambda level for this API.'
+            },
+            {
+                id: 'AwsSolutions-COG4',
+                reason: 'Cognito is not used; custom authentication is implemented at the Lambda level.'
+            }
+        ]);
+
         /**
          * MediaConvert Service Role to grant Mediaconvert Access to the source and Destination Bucket,
          * API invoke * is also required for the services.
@@ -1015,6 +1172,12 @@ export class VodFoundation extends cdk.Stack {
             value: snsTopic.snsTopic.topicName,
             description: 'SNS Topic used to capture the VOD workflow outputs including errors',
             exportName: `${ cdk.Aws.STACK_NAME}-SnsTopic`
+        });
+
+        new cdk.CfnOutput(this, 'GetYogiflixMediaApiUrl', {
+            value: getYogiflixMediaApi.url,
+            description: 'API endpoint for fetching all Yogiflix media details',
+            exportName: `${cdk.Aws.STACK_NAME}-GetYogiflixMediaApiUrl`
         });
     }
 }

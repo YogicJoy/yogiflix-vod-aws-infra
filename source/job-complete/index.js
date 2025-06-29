@@ -87,6 +87,7 @@ exports.handler = async function(event) {
                     const description = userMetadata.Description || '';
                     const shortDescription = userMetadata.ShortDescription || '';
                     const title = userMetadata.Title || '';
+                    const category = userMetadata.Category;
                     const guid = userMetadata.Guid || '';
 
                     const inputFile =
@@ -124,6 +125,7 @@ exports.handler = async function(event) {
                     results.description = description;
                     results.shortDescription = shortDescription;
                     results.title = title;
+                    results.category = category;
                     results.guid = guid;
 
                     // Write to DynamoDB
@@ -134,6 +136,7 @@ exports.handler = async function(event) {
                         author,
                         description,
                         shortDescription,
+                        category,
                         hlsGroup: HLS_GROUP,
                         thumbnails: THUMB_NAILS,
                         createdAt: new Date().toISOString()

@@ -35,6 +35,7 @@ exports.handler = async (event,context) => {
         const description = head.Metadata.description || '';
         const shortDescription = head.Metadata.shortdescription || '';
         const title = head.Metadata.title || '';
+        const category = head.Metadata.category || 'Yoga';
 
         const guid = uuidv4();
         const inputPath = `s3://${srcBucket}/${srcVideo}`;
@@ -46,7 +47,8 @@ exports.handler = async (event,context) => {
             Author: author,
             Description: description,
             ShortDescription: shortDescription,
-            Title: title
+            Title: title,
+            Category: category
         };
         
         /**
