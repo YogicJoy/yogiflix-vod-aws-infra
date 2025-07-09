@@ -121,6 +121,49 @@ export class VodFoundation extends cdk.Stack {
             partitionKey: { name: 'category', type: dynamodb.AttributeType.STRING }
         });
 
+        const originCheckLambda = new lambda.Function(this, 'OriginCheckLambda', {
+            code: lambda.Code.fromAsset('../origin-check'),
+            handler: 'index.handler',
+            runtime: lambda.Runtime.NODEJS_22_X,
+            description: 'Lambda@Edge to allow only specific origins',
+        });
+
+        // Publish a version for Lambda@Edge
+        const originCheckLambdaVersion = new lambda.Version(this, 'OriginCheckLambdaVersion', {
+            lambda: originCheckLambda,
+        });
+
+        // Find the ServiceRole created for the Lambda@Edge function
+        const originCheckLambdaServiceRole = originCheckLambda.role;
+
+        // Suppress managed policy warning on the ServiceRole
+        if (originCheckLambdaServiceRole) {
+            NagSuppressions.addResourceSuppressions(
+                originCheckLambdaServiceRole,
+                [
+                    {
+                        id: 'AwsSolutions-IAM4',
+                        reason: 'Lambda@Edge uses AWS managed policy AWSLambdaBasicExecutionRole for basic execution and logging.',
+                        appliesTo: [
+                            'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+                        ]
+                    },
+                    {
+                        id: 'AwsSolutions-IAM5',
+                        reason: 'Lambda@Edge needs to write logs to any log group/stream for CloudFront requests.',
+                        appliesTo: ['Resource::*']
+                    }
+                ]
+            );
+        }
+
+        // 2. Add permissions if needed (LambdaBasicExecutionRole is usually enough)
+        if (originCheckLambdaServiceRole) {
+            originCheckLambdaServiceRole.addManagedPolicy(
+                iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
+            );
+        }
+
         // IAM Roles & Policies (example for getSignedUrlLambda)
         const getSignedUrlLambdaRole = new iam.Role(this, 'GetSignedUrlLambdaRole', {
             assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
@@ -412,6 +455,13 @@ export class VodFoundation extends cdk.Stack {
                     cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
                     originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_S3_ORIGIN,
                     trustedKeyGroups: [keyGroup],
+                    edgeLambdas: [
+                        {
+                            functionVersion: originCheckLambdaVersion,
+                            eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+                            includeBody: false,
+                        },
+                    ],
                 },
                 '*jpg': {
                     origin: s3Origin,
@@ -420,6 +470,13 @@ export class VodFoundation extends cdk.Stack {
                     cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
                     originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_S3_ORIGIN,
                     trustedKeyGroups: [keyGroup],
+                    edgeLambdas: [
+                        {
+                            functionVersion: originCheckLambdaVersion,
+                            eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+                            includeBody: false,
+                        },
+                    ],
                 }
             },
             minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
